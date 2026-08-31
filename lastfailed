@@ -1,0 +1,3 @@
+{
+  "tests/test_job_matching.py::test_synonym_business_intelligence_matches_data_analyst": true
+}

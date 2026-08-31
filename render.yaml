@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: berlin-job-radar
+    env: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
