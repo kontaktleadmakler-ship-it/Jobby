@@ -69,18 +69,28 @@ class BrowserAuthManager:
             profile_dir.mkdir(parents=True, exist_ok=True)
             headless = not bool(os.getenv("DISPLAY"))
             # Headed mode is intentional: the user must perform the login/2FA/CAPTCHA themselves.
-            chromium_path = os.getenv("CHROMIUM_PATH", "").strip()
+            configured = os.getenv("CHROMIUM_PATH", "").strip()
+            candidates = [configured, "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
+            executable = next((x for x in candidates if x and Path(x).is_file()), None)
             launch_kwargs = {
                 "user_data_dir": str(profile_dir),
                 "headless": headless,
                 "viewport": {"width": 1440, "height": 900},
                 "locale": "de-DE",
                 "accept_downloads": False,
-                "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+                "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox"],
             }
-            if chromium_path and Path(chromium_path).exists():
-                launch_kwargs["executable_path"] = chromium_path
-            context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+            if executable:
+                launch_kwargs["executable_path"] = executable
+            try:
+                context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Chromium konnte nicht gestartet werden. "
+                    f"Gefundener Browser: {executable or 'keiner'}; "
+                    "setze CHROMIUM_PATH oder installiere Chromium im Container. "
+                    f"Originalfehler: {exc}"
+                ) from exc
             page = context.pages[0] if context.pages else await context.new_page()
             try:
                 await page.goto(LOGIN_URLS[source], wait_until="domcontentloaded", timeout=30000)
