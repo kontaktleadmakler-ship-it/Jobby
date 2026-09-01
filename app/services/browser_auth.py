@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -24,6 +25,37 @@ LOGIN_URLS = {
     "arbeitsagentur": "https://www.arbeitsagentur.de/jobsuche/",
 }
 
+
+def _find_chromium() -> str | None:
+    """Return a real browser executable available inside the Render container."""
+    candidates = []
+    configured = os.getenv("CHROMIUM_PATH", "").strip()
+    if configured:
+        candidates.append(configured)
+
+    candidates.extend([
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ])
+
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
 class BrowserAuthManager:
     def __init__(self):
         settings = get_settings()
@@ -39,64 +71,87 @@ class BrowserAuthManager:
     def available(self):
         return async_playwright is not None
 
+    def browser_info(self):
+        executable = _find_chromium()
+        bundled = None
+        if async_playwright is not None:
+            try:
+                from playwright.async_api import async_playwright as _ap
+                # The bundled executable is exposed without starting a browser.
+                # It is only informational here; Docker installs it at build time.
+                bundled = None
+            except Exception:
+                pass
+        return {
+            "playwright_installed": self.available(),
+            "chromium_path": executable,
+            "chromium_available": bool(executable),
+            "display": os.getenv("DISPLAY", ""),
+            "playwright_browsers_path": os.getenv("PLAYWRIGHT_BROWSERS_PATH", ""),
+        }
+
     def state(self, source):
+        info = self.browser_info()
         return {
             "source": source,
-            "available": self.available(),
+            "available": self.available() and info["chromium_available"],
             "started": source in self.started,
             "ready": source in self.completed,
             "login_url": LOGIN_URLS.get(source),
             "display": bool(os.getenv("DISPLAY")),
+            "chromium_path": info["chromium_path"],
         }
 
     async def _ensure(self):
         if not self.available():
-            raise RuntimeError("Playwright is not installed")
+            raise RuntimeError("Playwright ist nicht installiert. Prüfe requirements.txt und den Render-Build.")
+        executable = _find_chromium()
+        if not executable:
+            raise RuntimeError(
+                "Chromium ist im Container nicht installiert. "
+                "Der Render-Service muss mit dem mitgelieferten Dockerfile neu gebaut werden. "
+                "Erwartet wird /usr/bin/chromium."
+            )
         if not self.playwright:
             self.playwright = await async_playwright().start()
+        return executable
 
     async def start_login(self, source):
         if source not in LOGIN_URLS:
             raise ValueError(f"Unsupported login source: {source}")
         async with self.lock:
-            await self._ensure()
+            executable = await self._ensure()
             if source in self.contexts:
                 page = self.pages.get(source)
                 if page and not page.is_closed():
                     await page.bring_to_front()
                     return self.state(source)
+
             profile_dir = self.root / source
             profile_dir.mkdir(parents=True, exist_ok=True)
+
+            # DISPLAY is created by start.sh. Therefore Render gets a real
+            # headed Chromium that is exposed through the noVNC iframe.
             headless = not bool(os.getenv("DISPLAY"))
-            # Headed mode is intentional: the user must perform the login/2FA/CAPTCHA themselves.
-            configured = os.getenv("CHROMIUM_PATH", "").strip()
-            candidates = [configured, "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
-            executable = next((x for x in candidates if x and Path(x).is_file()), None)
-            launch_kwargs = {
-                "user_data_dir": str(profile_dir),
-                "headless": headless,
-                "viewport": {"width": 1440, "height": 900},
-                "locale": "de-DE",
-                "accept_downloads": False,
-                "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox"],
-            }
-            if executable:
-                launch_kwargs["executable_path"] = executable
-            try:
-                context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
-            except Exception as exc:
-                raise RuntimeError(
-                    "Chromium konnte nicht gestartet werden. "
-                    f"Gefundener Browser: {executable or 'keiner'}; "
-                    "setze CHROMIUM_PATH oder installiere Chromium im Container. "
-                    f"Originalfehler: {exc}"
-                ) from exc
+            log.info("Starting login browser source=%s executable=%s headless=%s", source, executable, headless)
+
+            context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                viewport={"width": 1440, "height": 900},
+                locale="de-DE",
+                accept_downloads=False,
+                executable_path=executable,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--window-size=1440,900",
+                ],
+            )
             page = context.pages[0] if context.pages else await context.new_page()
-            try:
-                await page.goto(LOGIN_URLS[source], wait_until="domcontentloaded", timeout=30000)
-            except Exception as exc:
-                await context.close()
-                raise RuntimeError(f"Portal konnte nicht geöffnet werden: {exc}") from exc
+            await page.goto(LOGIN_URLS[source], wait_until="domcontentloaded", timeout=30000)
             self.contexts[source] = context
             self.pages[source] = page
             self.started.add(source)
@@ -114,7 +169,8 @@ class BrowserAuthManager:
                 await context.close()
             except Exception:
                 pass
-        self.contexts.clear(); self.pages.clear()
+        self.contexts.clear()
+        self.pages.clear()
         if self.playwright:
             await self.playwright.stop()
             self.playwright = None
