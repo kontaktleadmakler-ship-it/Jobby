@@ -32,15 +32,10 @@ def _clean(value: str) -> str:
 
 
 def build_queries(profile):
-    """Generate several focused query clusters from the actual profile.
-
-    Queries are deliberately redundant in a controlled way: title/domain,
-    title+skill, domain+skill and explicit keyword variants. This improves recall
-    without turning the matcher into a keyword-only filter.
-    """
-    roles = profile.effective_roles()
+    roles = [x.strip() for x in (profile.target_roles or []) if x and x.strip()]
     skills = [x.strip() for x in (profile.skills or []) if x and x.strip()]
     keywords = [x.strip() for x in (profile.keywords or []) if x and x.strip()]
+    types = [x.strip() for x in (profile.employment_types or []) if x and x.strip()]
     queries = []
 
     def add(q):
@@ -48,16 +43,26 @@ def build_queries(profile):
         if q and q not in queries:
             queries.append(q)
 
-    for role in roles[:8]:
-        add(role)
+    anchors = roles[:8] + keywords[:6] + skills[:6]
+    for anchor in anchors:
+        add(anchor)
+
+    if not anchors:
+        for employment_type in types[:4]:
+            add(employment_type)
+        if not types:
+            add(profile.location or "job")
+
     for role in roles[:6]:
         for skill in skills[:3]:
             add(f"{role} {skill}")
-    for skill in skills[:5]:
-        add(skill)
-    for kw in keywords[:6]:
-        add(kw)
-    return queries[:20]
+    for keyword in keywords[:6]:
+        for skill in skills[:3]:
+            add(f"{keyword} {skill}")
+
+    # The source-specific discovery layer combines each query with the selected
+    # employment type and location, so the raw query remains profile-driven.
+    return queries[:24]
 
 
 class ScanManager:
@@ -292,13 +297,18 @@ class ScanManager:
         return jobs
 
     def login_required_sources(self):
-        required = []
-        if not self.browser_auth or not self.browser_auth.available():
-            return required
-        for source in self.profile.sources:
-            if source in {"stepstone", "indeed"} and source not in self.browser_auth.completed:
-                required.append(source)
-        return required
+        # Login is optional. Public discovery is always attempted first.
+        # A portal session is only required when the user explicitly chooses
+        # to use the interactive browser path.
+        return []
+
+    def auth_ready_sources(self):
+        if not self.browser_auth:
+            return set()
+        return {
+            source for source in ("stepstone", "indeed")
+            if source in self.browser_auth.completed and source in self.profile.sources
+        }
 
     async def scan(self):
         if self.lock.locked():
@@ -341,8 +351,12 @@ class ScanManager:
                                 jobs = await collector.search(q, self.profile.location, {"discovery": discovery, "client": client, "profile": self.profile})
                             except Exception as exc:
                                 log.debug("%s primary query failed: %s", name, exc)
-                            if not jobs and name in PORTAL_SOURCES:
-                                jobs = await self._discover_fallback(discovery, q)
+                            if not jobs and name in {"stepstone", "indeed"} and name in self.auth_ready_sources():
+                                for employment_type in (self.profile.employment_types or ["Werkstudent"]):
+                                    try:
+                                        jobs.extend(await self.browser_auth.search_candidates(name, q, self.profile.location, employment_type))
+                                    except Exception as exc:
+                                        log.info("interactive portal search failed for %s: %s", name, exc)
                             for raw in jobs:
                                 if raw.source == "generic":
                                     raw.source = source_for_url(raw.url)

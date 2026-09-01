@@ -36,10 +36,7 @@ class SearchProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
-    sources: list[str] = Field(default_factory=lambda: [
-        "stepstone", "indeed", "generic", "xing", "monster",
-        "jobware", "kimeta", "linkedin", "arbeitsagentur"
-    ])
+    sources: list[str] = Field(default_factory=lambda: ["stepstone", "indeed"])
     scan_interval_minutes: int = Field(default=60, ge=5, le=1440)
 
     def effective_roles(self) -> list[str]:
