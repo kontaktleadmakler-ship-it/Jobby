@@ -2,10 +2,9 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse, urljoin
+from urllib.parse import quote_plus
 
 from app.config import get_settings
-from app.collectors.base import RawJob, normalize_space
 
 log = logging.getLogger(__name__)
 
@@ -70,19 +69,24 @@ class BrowserAuthManager:
             profile_dir.mkdir(parents=True, exist_ok=True)
             headless = not bool(os.getenv("DISPLAY"))
             # Headed mode is intentional: the user must perform the login/2FA/CAPTCHA themselves.
+            chromium_path = os.getenv("CHROMIUM_PATH", "").strip()
             launch_kwargs = {
                 "user_data_dir": str(profile_dir),
                 "headless": headless,
                 "viewport": {"width": 1440, "height": 900},
                 "locale": "de-DE",
                 "accept_downloads": False,
+                "args": ["--no-sandbox", "--disable-dev-shm-usage"],
             }
-            executable = os.getenv("CHROMIUM_PATH", "").strip()
-            if executable and Path(executable).exists():
-                launch_kwargs["executable_path"] = executable
+            if chromium_path and Path(chromium_path).exists():
+                launch_kwargs["executable_path"] = chromium_path
             context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(LOGIN_URLS[source], wait_until="domcontentloaded", timeout=30000)
+            try:
+                await page.goto(LOGIN_URLS[source], wait_until="domcontentloaded", timeout=30000)
+            except Exception as exc:
+                await context.close()
+                raise RuntimeError(f"Portal konnte nicht geöffnet werden: {exc}") from exc
             self.contexts[source] = context
             self.pages[source] = page
             self.started.add(source)
@@ -93,52 +97,6 @@ class BrowserAuthManager:
             await self.start_login(source)
         self.completed.add(source)
         return self.state(source)
-
-    async def search_candidates(self, source, query, location, employment_type, limit=50):
-        html = await self.search(source, query, location, employment_type)
-        if not html:
-            return []
-        # Import lazily to avoid the discovery/browser-auth import cycle.
-        from app.services.discovery import SOURCE_DOMAINS, is_direct_job_url, is_non_job_url
-        from bs4 import BeautifulSoup
-
-        base_url = (
-            f"https://www.stepstone.de/jobs/{quote_plus(query)}/in-{quote_plus(location)}"
-            if source == "stepstone"
-            else f"https://de.indeed.com/jobs?q={quote_plus(query + ' ' + employment_type)}&l={quote_plus(location)}"
-        )
-        soup = BeautifulSoup(html, "html.parser")
-        out, seen = [], set()
-        base_host = urlparse(base_url).netloc.lower().split(":")[0]
-        for a in soup.select("a[href]"):
-            href = urljoin(base_url, a.get("href", "").strip())
-            title = normalize_space(a.get_text(" ", strip=True))
-            if not href or len(title) < 8:
-                continue
-            host = urlparse(href).netloc.lower().split(":")[0]
-            if not any(host == d or host.endswith("." + d) for d in SOURCE_DOMAINS[source]):
-                continue
-            if is_non_job_url(href) or not is_direct_job_url(href, source):
-                continue
-            key = href.split("#", 1)[0].rstrip("/")
-            if key in seen:
-                continue
-            seen.add(key)
-            container = a
-            for parent in range(3):
-                if container.parent:
-                    container = container.parent
-            snippet = normalize_space(container.get_text(" ", strip=True))
-            out.append(RawJob(
-                title=title[:500],
-                description=snippet[:4000],
-                url=href,
-                source=source,
-                employment_type=employment_type,
-            ))
-            if len(out) >= limit:
-                break
-        return out
 
     async def close(self):
         for context in list(self.contexts.values()):

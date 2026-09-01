@@ -14,5 +14,3 @@ async function loadAuth(){const el=document.getElementById("auth-list");if(!el)r
 async function startPortalLogin(source){const r=await fetch(`/api/auth/start/${encodeURIComponent(source)}`,{method:"POST",headers:authHeaders()});const d=await r.json();if(!r.ok){alert(d.detail||"Login konnte nicht gestartet werden");return}document.getElementById("vnc").style.display="block";document.getElementById("auth-message").textContent=`${source}: Im Browser anmelden. Danach „Login abgeschlossen“ klicken.`;loadAuth()}
 async function completePortalLogin(source){await fetch(`/api/auth/complete/${encodeURIComponent(source)}`,{method:"POST",headers:authHeaders()});loadAuth();document.getElementById("auth-message").textContent=`${source}: Session bestätigt. Du kannst jetzt scannen.`}
 document.addEventListener("DOMContentLoaded",()=>loadAuth());
-
-function saveAccessToken(){const v=document.getElementById("access-token")?.value.trim();if(v)localStorage.setItem("dashboard_access_token",v);document.getElementById("auth-help").textContent=v?"TOKEN GESPEICHERT":"TOKEN FEHLT";loadAuth()}
