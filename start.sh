@@ -2,6 +2,7 @@
 set -eu
 Xvfb :99 -screen 0 1440x900x24 -ac +extension GLX +render -noreset >/tmp/xvfb.log 2>&1 &
 export DISPLAY=:99
+export CHROMIUM_PATH="${CHROMIUM_PATH:-/usr/bin/chromium}"
 # Give Xvfb a moment to create the display before Chromium/noVNC starts.
 i=0
 while ! xdpyinfo -display :99 >/dev/null 2>&1; do
